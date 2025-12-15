@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<title>Tower Defense</title>
+<style>
+/* ОСНОВНІ СТИЛІ */
+/* ОСНОВНІ СТИЛІ */
+body { 
+    background: #222; 
+    color: #fff;      
+    font-family: Arial; 
+    text-align: center; 
+    /* Видаляємо марджини для кращого використання простору на мобільних */
+    margin: 0; 
+    padding: 10px;
+}
+/* КОНТЕЙНЕР ДЛЯ КНОПОК ТА ІНФО (допомагає з компонуванням на мобільних) */
+h1, p, select, button {
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+/* КАНВАС: робимо його чутливим до розміру екрана */
+canvas { 
+    background: #333; 
+    display: block; 
+    margin: 10px auto; 
+    border: 2px solid #555; 
+    /* Максимальний розмір 100% від ширини контейнера */
+    max-width: 100%; 
+    /* Зберігаємо співвідношення сторін 3:2 (600:400) */
+    height: auto; 
+}
+
+/* КНОПКИ: робимо їх більш зручними для натискання */
+button, select { 
+    padding: 12px 15px; /* Збільшуємо padding для зручного натискання пальцем */
+    font-size: 16px; 
+    cursor: pointer; 
+    margin: 5px 3px; /* Зменшуємо горизонтальний марджин, щоб кнопки помістилися */
+    display: inline-block;
+    white-space: nowrap;
+}
+
+/* МЕДІА-ЗАПИТ: Якщо ширина екрана мала (телефон), робимо кнопки ширшими */
+@media (max-width: 650px) {
+    button, select {
+        padding: 10px;
+        font-size: 14px; /* Трохи зменшуємо шрифт */
+        margin: 5px 2px;
+    }
+    /* Якщо кнопки не поміщаються в один рядок, дозволяємо їм переноситися */
+    #buyTower, #buySniperTower {
+        display: block; 
+        width: 90%;
+        margin: 5px auto;
+    }
+}
+</style>
+</head>
+<body>
+
+<h1>🛡 Tower Defense</h1>
+<p>
+  Монети: <span id="coins">100</span> |
+  Хвиля: <span id="wave">0</span>/10
+</p>
+
+<select id="modeSelect">
+  <option value="normal">Звичайний режим</option>
+  <option value="hard">Важкий режим</option>
+</select>
+
+<button id="startGame">▶ Почати гру</button>
+<button id="restartGame">⟳ Рестарт</button>
+<button id="buyTower">Купити вежу (50)</button>
+<button id="buySniperTower">Купити Снайперську вежу (100)</button>
+
+<canvas id="game" width="600" height="400"></canvas>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+let coins = 100;
+let wave = 0;
+let baseHP = 100;
+let gameStarted = false;
+let buyingTower = false;
+let buyingSniper = false;
+
+// НОВІ ЗМІННІ ДЛЯ ВИДІЛЕННЯ ТА ПРОДАЖУ
+let selectedTower = null;
+let hoveredTower = null;
+const SELL_BUTTON_SIZE = 15; // Розмір кнопки продажу (хрестика)
+
+const towers = [];
+const snipers = [];
+const enemies = [];
+const bullets = [];
+const bosses = [];
+
+const path = [
+  {x:0, y:60},{x:200, y:60},{x:200, y:200},{x:80, y:200},
+  {x:80, y:350},{x:350, y:350},{x:350, y:120},{x:520, y:120},
+  {x:520, y:300},{x:600, y:300}
+];
+const pathWidth = 40;
+
+let mode = "normal";
+document.getElementById("modeSelect").onchange = () => {
+  mode = document.getElementById("modeSelect").value;
+};
+
+// 🟢 Кнопки
+document.getElementById("startGame").onclick = () => {
+  if(!gameStarted){ gameStarted=true; wave=1; spawnWaveSequence(); }
+};
+document.getElementById("restartGame").onclick = () => location.reload();
+document.getElementById("buyTower").onclick = () => { if(coins>=50){ buyingTower=true; selectedTower=null; } };
+document.getElementById("buySniperTower").onclick = () => { if(coins>=100){ buyingSniper=true; selectedTower=null; } };
+
+// ❌ Перевірка на доріжку
+function isOnPath(x,y){
+  for(let i=0;i<path.length-1;i++){
+    const a=path[i], b=path[i+1];
+    const dx=b.x-a.x, dy=b.y-a.y;
+    const len=Math.hypot(dx,dy);
+    const t=((x-a.x)*dx+(y-a.y)*dy)/(len*len);
+    if(t<0||t>1) continue;
+    const px=a.x+t*dx, py=a.y+t*dy;
+    if(Math.hypot(x-px,y-py)<pathWidth/2) return true;
+  }
+  return false;
+}
+
+// 🖱 Клік на канвас
+canvas.addEventListener("click", e => {
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left;
+  const y = e.clientY - r.top;
+  
+  // 1. ПЕРЕВІРКА НАТИСКАННЯ НА КНОПКУ ПРОДАЖУ
+  if(selectedTower){
+    // Координати хрестика (трохи вище вежі)
+    const sellX = selectedTower.x + 10;
+    const sellY = selectedTower.y - 15;
+    
+    // Перевірка, чи клік був на хрестику
+    if(x >= sellX - SELL_BUTTON_SIZE/2 && x <= sellX + SELL_BUTTON_SIZE/2 &&
+       y >= sellY - SELL_BUTTON_SIZE/2 && y <= sellY + SELL_BUTTON_SIZE/2){
+      
+      // Визначаємо тип вежі
+      const isSniper = snipers.includes(selectedTower);
+      
+      // Повертаємо 50% вартості
+      if (isSniper) {
+        coins += 50; // 50% від 100
+        snipers.splice(snipers.indexOf(selectedTower), 1);
+      } else {
+        coins += 25; // 50% від 50
+        towers.splice(towers.indexOf(selectedTower), 1);
+      }
+      
+      selectedTower = null;
+      return; // Вихід, оскільки ми продали вежу
+    }
+  }
+
+  // 2. КУПІВЛЯ
+  if(isOnPath(x,y)) {
+    selectedTower = null; // Зняти виділення, якщо клік на доріжці
+    return;
+  }
+
+  if(buyingTower){ 
+    towers.push({x,y,range:120,cooldown:0,stunned:0}); 
+    coins-=50; 
+    buyingTower=false; 
+  }
+  else if(buyingSniper){ 
+    snipers.push({x,y,range:240,cooldown:0}); 
+    coins-=100; 
+    buyingSniper=false; 
+  }
+
+  // 3. ВИБІР ВЕЖІ (якщо не купуємо і не продаємо)
+  else {
+      // Перевіряємо, чи клікнули на вежу
+      const allTowers = [...towers, ...snipers];
+      const clickedTower = allTowers.find(t => Math.hypot(t.x - x, t.y - y) < 15); // Радіус кліку 15
+      
+      if(clickedTower){
+          selectedTower = clickedTower;
+      } else {
+          selectedTower = null; // Зняти виділення, якщо клік був у порожньому місці
+      }
+  }
+});
+
+// 🖱 Обробник руху миші для "наведення"
+canvas.addEventListener("mousemove", e => {
+    const r = canvas.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const y = e.clientY - r.top;
+
+    hoveredTower = null;
+    const allTowers = [...towers, ...snipers];
+    const towerUnderMouse = allTowers.find(t => Math.hypot(t.x - x, t.y - y) < 15);
+    
+    if (towerUnderMouse) {
+        hoveredTower = towerUnderMouse;
+        canvas.style.cursor = 'pointer'; // Змінюємо курсор, якщо ми над вежею
+    } else {
+        canvas.style.cursor = 'default';
+    }
+});
+
+
+// ⏱ Затримка (без змін)
+function sleep(ms){ return new Promise(res=>setTimeout(res,ms)); }
+
+// 🌊 Спавн хвиль (без змін)
+async function spawnWave(){
+  const incr = mode==="normal"?1:2;
+  const total = wave*incr;
+  const hpBase = mode==="normal"?50:50*0.75;
+  for(let i=0;i<total;i++){
+    enemies.push({x:path[0].x,y:path[0].y,hp:hpBase+wave*30,maxHp:hpBase+wave*30,speed:1,point:0});
+    await sleep(400);
+  }
+  if(wave===10){
+    const numBoss = mode==="normal"?1:2;
+    for(let i=0;i<numBoss;i++){
+      const boss={x:path[0].x,y:path[0].y,hp:500,maxHp:500,speed:0.7,point:0,lastAttack:0};
+      enemies.push(boss); bosses.push(boss);
+    }
+  }
+}
+
+// Послідовність хвиль (з алертом про перемогу)
+async function spawnWaveSequence(){
+  while(wave <= 10){
+    await spawnWave();
+    while(enemies.length > 0) await sleep(100);
+    wave++;
+  }
+  
+  gameStarted = false; 
+  alert("🎉 ВІТАЄМО! Ви успішно захистили базу!");
+}
+
+// 🎨 Малюємо доріжку (без змін)
+function drawPath(){
+  ctx.strokeStyle="#555"; ctx.lineWidth=pathWidth; ctx.lineJoin="round";
+  ctx.beginPath(); ctx.moveTo(path[0].x,path[0].y);
+  path.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.stroke();
+}
+
+// 🎨 МАЛЮВАННЯ ХРЕСТИКА ДЛЯ ПРОДАЖУ
+function drawSellButton(t){
+    const sellX = t.x + 10;
+    const sellY = t.y - 15;
+    const s = SELL_BUTTON_SIZE / 2;
+    
+    ctx.fillStyle = "red";
+    ctx.fillRect(sellX - s, sellY - s, SELL_BUTTON_SIZE, SELL_BUTTON_SIZE);
+    
+    // Малюємо "X" білим кольором
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(sellX - s + 2, sellY - s + 2);
+    ctx.lineTo(sellX + s - 2, sellY + s - 2);
+    ctx.moveTo(sellX + s - 2, sellY - s + 2);
+    ctx.lineTo(sellX - s + 2, sellY + s - 2);
+    ctx.stroke();
+
+    // Додаємо інформацію про продаж
+    const sellPrice = snipers.includes(t) ? 50 : 25;
+    ctx.fillStyle = "yellow";
+    ctx.font = "bold 10px Arial";
+    ctx.fillText(sellPrice, sellX, sellY + SELL_BUTTON_SIZE + 5);
+}
+
+
+// 🔄 Головний цикл
+function update(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawPath();
+
+  // 🏰 Звичайні вежі
+  towers.forEach(t=>{
+    ctx.fillStyle=t.stunned>0?"gray":"cyan";
+    // Якщо вежа виділена або на неї наведено курсор, малюємо коло вибору/рейнджа
+    if(t === selectedTower || t === hoveredTower) {
+        ctx.strokeStyle = "rgba(0, 255, 255, 0.5)";
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, t.range, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(t.x,t.y,10,0,Math.PI*2); ctx.fill();
+    
+    if(t === selectedTower) {
+        drawSellButton(t);
+    }
+    
+    if(t.cooldown>0) t.cooldown--; if(t.stunned>0) t.stunned--;
+    if(t.cooldown===0 && t.stunned===0){
+      const target=enemies.find(e=>Math.hypot(e.x-t.x,e.y-t.y)<t.range);
+      if(target){
+        const d=Math.hypot(target.x-t.x,target.y-t.y);
+        bullets.push({x:t.x,y:t.y,dx:(target.x-t.x)/d*4,dy:(target.y-t.y)/d*4,magnetic:false});
+        t.cooldown=25;
+      }
+    }
+  });
+
+  // 🎯 Снайперські
+  snipers.forEach(s=>{
+    // Якщо снайперська вежа виділена або на неї наведено курсор, малюємо коло вибору/рейнджа
+    if(s === selectedTower || s === hoveredTower) {
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.range, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+
+    if(s.cooldown>0) s.cooldown--;
+    else{
+      const target=enemies.find(e=>Math.hypot(e.x-s.x,e.y-s.y)<s.range);
+      if(target){ bullets.push({x:s.x,y:s.y,dx:0,dy:0,magnetic:true,target}); s.cooldown=50; }
+    }
+    ctx.fillStyle="white"; ctx.beginPath(); ctx.arc(s.x,s.y,12,0,Math.PI*2); ctx.fill();
+
+    if(s === selectedTower) {
+        drawSellButton(s);
+    }
+  });
+
+  // 👾 Вороги (без змін)
+  for(let i=enemies.length-1;i>=0;i--){
+    const e=enemies[i];
+    const target=path[e.point+1];
+    if(target){
+      const dx=target.x-e.x, dy=target.y-e.y, dist=Math.hypot(dx,dy);
+      e.x+=dx/dist*e.speed; e.y+=dy/dist*e.speed; if(dist<2) e.point++;
+    } else { baseHP -= bosses.includes(e)?50:10; enemies.splice(i,1); if(baseHP<=0){ alert("🛑 База знищена!"); location.reload(); } }
+
+    if(bosses.includes(e)){
+      ctx.fillStyle="orange"; ctx.beginPath(); ctx.moveTo(e.x,e.y-15); ctx.lineTo(e.x-15,e.y+15); ctx.lineTo(e.x+15,e.y+15); ctx.closePath(); ctx.fill();
+      if(Date.now()-e.lastAttack>1000 && towers.length>0){ towers[Math.floor(Math.random()*towers.length)].stunned=90; e.lastAttack=Date.now(); }
+    } else { ctx.fillStyle="red"; ctx.fillRect(e.x-10,e.y-10,20,20); }
+
+    ctx.fillStyle="black"; ctx.fillRect(e.x-12,e.y-16,24,4);
+    ctx.fillStyle="lime"; ctx.fillRect(e.x-12,e.y-16,24*(e.hp/e.maxHp),4);
+  }
+
+  // 🔫 Кулі (без змін)
+  for(let bi=bullets.length-1;bi>=0;bi--){
+    const b=bullets[bi];
+    
+    if(b.magnetic && b.target){
+        if(enemies.includes(b.target)){
+            const dx=b.target.x-b.x, dy=b.target.y-b.y;
+            const dist=Math.hypot(dx,dy);
+            b.dx=dx/dist*6; b.dy=dy/dist*6;
+        } else {
+            bullets.splice(bi,1);
+            continue; 
+        }
+    }
+    b.x+=b.dx; b.y+=b.dy;
+    ctx.fillStyle="yellow"; ctx.fillRect(b.x,b.y,4,4);
+
+    for(let ei=enemies.length-1;ei>=0;ei--){
+      const e=enemies[ei];
+      if(Math.abs(b.x-e.x)<10 && Math.abs(b.y-e.y)<10){
+        e.hp-=20; bullets.splice(bi,1);
+        if(e.hp<=0){
+          const isBoss=bosses.includes(e);
+          if(isBoss){ bosses.splice(bosses.indexOf(e),1); coins+=10; }
+          else coins+=(mode==="hard"?5:10);
+          enemies.splice(ei,1);
+        }
+        break;
+      }
+    }
+  }
+
+  document.getElementById("coins").innerText=coins;
+  document.getElementById("wave").innerText=Math.min(wave,10);
+  if(!document.getElementById("baseHP")){
+    const p=document.createElement("p"); p.id="baseHP"; p.innerText="База HP: "+baseHP; document.body.insertBefore(p,canvas);
+  } else document.getElementById("baseHP").innerText="База HP: "+baseHP;
+
+  requestAnimationFrame(update);
+}
+
+update();
+</script>
+
+
+</body>
+</html>
