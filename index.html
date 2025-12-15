@@ -381,7 +381,7 @@ function update(){
         if(e.hp<=0){
           const isBoss=bosses.includes(e);
           if(isBoss){ bosses.splice(bosses.indexOf(e),1); coins+=10; }
-          else coins+=(mode==="hard"?5:10);
+          else coins+=(mode==="hard"?8:10);
           enemies.splice(ei,1);
         }
         break;
