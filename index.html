@@ -5,57 +5,27 @@
 <title>Tower Defense</title>
 <style>
 /* ОСНОВНІ СТИЛІ */
-/* ОСНОВНІ СТИЛІ */
 body { 
     background: #222; 
     color: #fff;      
     font-family: Arial; 
     text-align: center; 
-    /* Видаляємо марджини для кращого використання простору на мобільних */
-    margin: 0; 
-    padding: 10px;
 }
-/* КОНТЕЙНЕР ДЛЯ КНОПОК ТА ІНФО (допомагає з компонуванням на мобільних) */
-h1, p, select, button {
-    max-width: 100%;
-    box-sizing: border-box;
-}
-
-/* КАНВАС: робимо його чутливим до розміру екрана */
 canvas { 
     background: #333; 
     display: block; 
     margin: 10px auto; 
     border: 2px solid #555; 
-    /* Максимальний розмір 100% від ширини контейнера */
-    max-width: 100%; 
-    /* Зберігаємо співвідношення сторін 3:2 (600:400) */
-    height: auto; 
 }
-
-/* КНОПКИ: робимо їх більш зручними для натискання */
 button, select { 
-    padding: 12px 15px; /* Збільшуємо padding для зручного натискання пальцем */
+    padding: 10px 20px; 
     font-size: 16px; 
     cursor: pointer; 
-    margin: 5px 3px; /* Зменшуємо горизонтальний марджин, щоб кнопки помістилися */
-    display: inline-block;
-    white-space: nowrap;
+    margin: 5px; 
 }
-
-/* МЕДІА-ЗАПИТ: Якщо ширина екрана мала (телефон), робимо кнопки ширшими */
-@media (max-width: 650px) {
-    button, select {
-        padding: 10px;
-        font-size: 14px; /* Трохи зменшуємо шрифт */
-        margin: 5px 2px;
-    }
-    /* Якщо кнопки не поміщаються в один рядок, дозволяємо їм переноситися */
-    #buyTower, #buySniperTower {
-        display: block; 
-        width: 90%;
-        margin: 5px auto;
-    }
+#advanceWave:disabled {
+    background-color: #3e2723 !important; /* Темніший колір для заблокованої кнопки */
+    cursor: not-allowed;
 }
 </style>
 </head>
@@ -74,32 +44,56 @@ button, select {
 
 <button id="startGame">▶ Почати гру</button>
 <button id="restartGame">⟳ Рестарт</button>
+<button id="advanceWave" style="background-color: darkgoldenrod; color: white;">▶▶ Наступна хвиля</button>
+
 <button id="buyTower">Купити вежу (50)</button>
 <button id="buySniperTower">Купити Снайперську вежу (100)</button>
+<button id="buyBarricade">🚧 Купити Барикаду (75)</button>
 
 <canvas id="game" width="600" height="400"></canvas>
 
 <script>
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
+const advanceWaveButton = document.getElementById("advanceWave");
 
 let coins = 100;
-let wave = 0;
+let wave = 0; 
+let currentWaveIndex = 0; 
 let baseHP = 100;
 let gameStarted = false;
 let buyingTower = false;
 let buyingSniper = false;
+let buyingBarricade = false;
 
-// НОВІ ЗМІННІ ДЛЯ ВИДІЛЕННЯ ТА ПРОДАЖУ
+// НОВИЙ ПРАПОРЕЦЬ: Блокує багаторазовий запуск функції spawnWave
+let isSpawning = false; 
+
+// ЗМІННІ ДЛЯ ВИДІЛЕННЯ ТА КЕРУВАННЯ
 let selectedTower = null;
 let hoveredTower = null;
-const SELL_BUTTON_SIZE = 15; // Розмір кнопки продажу (хрестика)
+let selectedBarricade = null;
+let hoveredBarricade = null;
+
+// КОНСТАНТИ КЕРУВАННЯ
+const BUTTON_SIZE = 20;
+const BUTTON_OFFSET_Y = -15; 
+const BUTTON_UPGRADE_OFFSET_X = -25;
+const BUTTON_SELL_OFFSET_X = 25;
+const BUTTON_HEAL_OFFSET_X = 0; 
 
 const towers = [];
 const snipers = [];
 const enemies = [];
 const bullets = [];
 const bosses = [];
+const barricades = [];
+
+// Характеристики Барикад
+const BARRICADE_MAX_HP = { 1: 100, 2: 120, 3: 150 };
+const BARRICADE_COST = 75;
+const BARRICADE_UPGRADE_COST = 50;
+const BARRICADE_HEAL_COST = 10; 
 
 const path = [
   {x:0, y:60},{x:200, y:60},{x:200, y:200},{x:80, y:200},
@@ -113,15 +107,103 @@ document.getElementById("modeSelect").onchange = () => {
   mode = document.getElementById("modeSelect").value;
 };
 
-// 🟢 Кнопки
+// --- ФУНКЦІЇ БАРИКАД/ВЕЖ (Без змін) ---
+function createBarricade(x, y) {
+    return { x, y, hp: BARRICADE_MAX_HP[1], maxHp: BARRICADE_MAX_HP[1], level: 1 };
+}
+function getBarricadeUpgradeCost(barricade) {
+    return (barricade.level < 3) ? BARRICADE_UPGRADE_COST : null;
+}
+function upgradeBarricade(barricade) {
+    const cost = getBarricadeUpgradeCost(barricade);
+    if (!cost || coins < cost) return false;
+    coins -= cost;
+    barricade.level++;
+    barricade.maxHp = BARRICADE_MAX_HP[barricade.level];
+    barricade.hp = barricade.maxHp; 
+    return true;
+}
+function healBarricade(barricade) {
+    if (barricade.hp >= barricade.maxHp || coins < BARRICADE_HEAL_COST) return false;
+    coins -= BARRICADE_HEAL_COST;
+    barricade.hp = Math.min(barricade.hp + 10, barricade.maxHp); 
+    return true;
+}
+function getBarricadeSellPrice(barricade) {
+    const totalSpent = BARRICADE_COST + (barricade.level - 1) * BARRICADE_UPGRADE_COST;
+    return Math.floor(totalSpent / 2); 
+}
+function sellBarricade(barricade) {
+    const refund = getBarricadeSellPrice(barricade);
+    coins += refund;
+    barricades.splice(barricades.indexOf(barricade), 1);
+    selectedBarricade = null;
+}
+function createNormalTower(x, y) { return { x, y, range: 120, cooldown: 0, stunned: 0, level: 1, damage: 20 }; }
+function createSniperTower(x, y) { return { x, y, range: 240, cooldown: 0, level: 1, damage: 20 }; }
+function getUpgradeCost(tower) {
+    const isSniper = snipers.includes(tower);
+    return (tower.level < 3) ? (isSniper ? 50 : 25) : null;
+}
+function upgradeTower(tower) {
+    const cost = getUpgradeCost(tower);
+    if (!cost || coins < cost) return false;
+    coins -= cost;
+    tower.level++;
+    tower.range *= 1.15; 
+    tower.damage += 10; 
+    return true;
+}
+function getSellPrice(tower) {
+    const isSniper = snipers.includes(tower);
+    const baseCost = isSniper ? 100 : 50;
+    const upgradeCost = isSniper ? 50 : 25;
+    const totalSpent = baseCost + (tower.level - 1) * upgradeCost;
+    return Math.floor(totalSpent / 2); 
+}
+function sellTower(tower) {
+    const refund = getSellPrice(tower);
+    coins += refund;
+    const isSniper = snipers.includes(tower);
+    if (isSniper) {
+        snipers.splice(snipers.indexOf(tower), 1);
+    } else {
+        towers.splice(towers.indexOf(tower), 1);
+    }
+    selectedTower = null;
+}
+
+
+// --- КНОПКИ HTML ---
 document.getElementById("startGame").onclick = () => {
-  if(!gameStarted){ gameStarted=true; wave=1; spawnWaveSequence(); }
+  if(!gameStarted){ 
+        gameStarted=true; 
+        currentWaveIndex=1; 
+        spawnWaveSequence(currentWaveIndex); 
+    }
 };
 document.getElementById("restartGame").onclick = () => location.reload();
-document.getElementById("buyTower").onclick = () => { if(coins>=50){ buyingTower=true; selectedTower=null; } };
-document.getElementById("buySniperTower").onclick = () => { if(coins>=100){ buyingSniper=true; selectedTower=null; } };
 
-// ❌ Перевірка на доріжку
+// 🐛 ВИПРАВЛЕНА ЛОГІКА: Перехід до наступної хвилі
+document.getElementById("advanceWave").onclick = () => {
+    if (!gameStarted || currentWaveIndex >= 10 || isSpawning) return;
+
+    currentWaveIndex++;
+    spawnWaveSequence(currentWaveIndex); 
+};
+
+document.getElementById("buyTower").onclick = () => { 
+    if(coins>=50){ buyingTower=true; buyingSniper=false; buyingBarricade=false; selectedTower=null; selectedBarricade=null; } 
+};
+document.getElementById("buySniperTower").onclick = () => { 
+    if(coins>=100){ buyingSniper=true; buyingTower=false; buyingBarricade=false; selectedTower=null; selectedBarricade=null; } 
+};
+document.getElementById("buyBarricade").onclick = () => { 
+    if(coins>=BARRICADE_COST){ buyingBarricade=true; buyingTower=false; buyingSniper=false; selectedTower=null; selectedBarricade=null; } 
+};
+
+
+// ❌ Перевірка на доріжку (Без змін)
 function isOnPath(x,y){
   for(let i=0;i<path.length-1;i++){
     const a=path[i], b=path[i+1];
@@ -135,218 +217,399 @@ function isOnPath(x,y){
   return false;
 }
 
-// 🖱 Клік на канвас
+// 🖱 Клік на канвас (Без змін, логіка керування вежами коректна)
 canvas.addEventListener("click", e => {
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left;
   const y = e.clientY - r.top;
-  
-  // 1. ПЕРЕВІРКА НАТИСКАННЯ НА КНОПКУ ПРОДАЖУ
-  if(selectedTower){
-    // Координати хрестика (трохи вище вежі)
-    const sellX = selectedTower.x + 10;
-    const sellY = selectedTower.y - 15;
-    
-    // Перевірка, чи клік був на хрестику
-    if(x >= sellX - SELL_BUTTON_SIZE/2 && x <= sellX + SELL_BUTTON_SIZE/2 &&
-       y >= sellY - SELL_BUTTON_SIZE/2 && y <= sellY + SELL_BUTTON_SIZE/2){
-      
-      // Визначаємо тип вежі
-      const isSniper = snipers.includes(selectedTower);
-      
-      // Повертаємо 50% вартості
-      if (isSniper) {
-        coins += 50; // 50% від 100
-        snipers.splice(snipers.indexOf(selectedTower), 1);
-      } else {
-        coins += 25; // 50% від 50
-        towers.splice(towers.indexOf(selectedTower), 1);
-      }
-      
-      selectedTower = null;
-      return; // Вихід, оскільки ми продали вежу
-    }
-  }
 
-  // 2. КУПІВЛЯ
-  if(isOnPath(x,y)) {
-    selectedTower = null; // Зняти виділення, якщо клік на доріжці
-    return;
+    let entityClicked = false;
+
+    // 1. ПЕРЕВІРКА КЛІКУ НА КНОПКИ ВЕЖІ
+    let clickedTower = [...towers, ...snipers].find(t => {
+        const s = BUTTON_SIZE / 2;
+        const sellX = t.x + BUTTON_SELL_OFFSET_X;
+        const sellY = t.y + BUTTON_OFFSET_Y;
+        const upgradeX = t.x + BUTTON_UPGRADE_OFFSET_X;
+        const upgradeY = t.y + BUTTON_OFFSET_Y;
+        
+        if ((x >= sellX - s && x <= sellX + s && y >= sellY - s && y <= sellY + s) ||
+            (x >= upgradeX - s && x <= upgradeX + s && y >= upgradeY - s && y <= upgradeY + s)) return true;
+        
+        if (Math.hypot(t.x - x, t.y - y) < 15) return true;
+        
+        return false;
+    });
+
+    if (clickedTower) {
+        selectedTower = clickedTower;
+        selectedBarricade = null; 
+        entityClicked = true;
+
+        const sellX = selectedTower.x + BUTTON_SELL_OFFSET_X;
+        const sellY = selectedTower.y + BUTTON_OFFSET_Y;
+        const upgradeX = selectedTower.x + BUTTON_UPGRADE_OFFSET_X;
+        const upgradeY = selectedTower.y + BUTTON_OFFSET_Y;
+        const s = BUTTON_SIZE / 2;
+
+        if(x >= sellX - s && x <= sellX + s && y >= sellY - s && y <= sellY + s){ sellTower(selectedTower); return; }
+        if(x >= upgradeX - s && x <= upgradeX + s && y >= upgradeY - s && y <= upgradeY + s){ upgradeTower(selectedTower); return; }
+    }
+
+    // 2. ПЕРЕВІРКА КЛІКУ НА КНОПКИ БАРИКАДИ
+    let clickedBarricade = barricades.find(b => {
+        const s = BUTTON_SIZE / 2;
+        const sellX = b.x + BUTTON_SELL_OFFSET_X;
+        const sellY = b.y + BUTTON_OFFSET_Y;
+        const upgradeX = b.x + BUTTON_UPGRADE_OFFSET_X;
+        const upgradeY = b.y + BUTTON_OFFSET_Y;
+        const healX = b.x + BUTTON_HEAL_OFFSET_X;
+        const healY = b.y + BUTTON_OFFSET_Y;
+
+        if ((x >= sellX - s && x <= sellX + s && y >= sellY - s && y <= sellY + s) ||
+            (x >= upgradeX - s && x <= upgradeX + s && y >= upgradeY - s && y <= upgradeY + s) ||
+            (x >= healX - s && x <= healX + s && y >= healY - s && y <= healY + s)) return true;
+
+        if (Math.hypot(b.x - x, b.y - y) < 15) return true;
+
+        return false;
+    });
+
+    if (clickedBarricade) {
+        selectedBarricade = clickedBarricade;
+        selectedTower = null; 
+        entityClicked = true;
+
+        const sellX = selectedBarricade.x + BUTTON_SELL_OFFSET_X;
+        const sellY = selectedBarricade.y + BUTTON_OFFSET_Y;
+        const upgradeX = selectedBarricade.x + BUTTON_UPGRADE_OFFSET_X;
+        const upgradeY = selectedBarricade.y + BUTTON_OFFSET_Y;
+        const healX = selectedBarricade.x + BUTTON_HEAL_OFFSET_X;
+        const healY = selectedBarricade.y + BUTTON_OFFSET_Y;
+        const s = BUTTON_SIZE / 2;
+
+        if(x >= sellX - s && x <= sellX + s && y >= sellY - s && y <= sellY + s){ sellBarricade(selectedBarricade); return; }
+        if(x >= upgradeX - s && x <= upgradeX + s && y >= upgradeY - s && y <= upgradeY + s){ upgradeBarricade(selectedBarricade); return; }
+        if(x >= healX - s && x <= healX + s && y >= healY - s && y <= healY + s){ healBarricade(selectedBarricade); return; }
+    }
+
+    if (!entityClicked) {
+        selectedTower = null;
+        selectedBarricade = null;
+    }
+
+  // 3. КУПІВЛЯ ТА РОЗМІЩЕННЯ 
+  if(buyingBarricade && isOnPath(x,y)){
+      barricades.push(createBarricade(x, y));
+      coins -= BARRICADE_COST;
+      buyingBarricade = false;
   }
-
-  if(buyingTower){ 
-    towers.push({x,y,range:120,cooldown:0,stunned:0}); 
-    coins-=50; 
-    buyingTower=false; 
-  }
-  else if(buyingSniper){ 
-    snipers.push({x,y,range:240,cooldown:0}); 
-    coins-=100; 
-    buyingSniper=false; 
-  }
-
-  // 3. ВИБІР ВЕЖІ (якщо не купуємо і не продаємо)
-  else {
-      // Перевіряємо, чи клікнули на вежу
-      const allTowers = [...towers, ...snipers];
-      const clickedTower = allTowers.find(t => Math.hypot(t.x - x, t.y - y) < 15); // Радіус кліку 15
-      
-      if(clickedTower){
-          selectedTower = clickedTower;
-      } else {
-          selectedTower = null; // Зняти виділення, якщо клік був у порожньому місці
-      }
+  else if (!isOnPath(x,y)){
+      if(buyingTower){ 
+          towers.push(createNormalTower(x, y)); 
+          coins-=50; 
+          buyingTower=false; 
+    }
+    else if(buyingSniper){ 
+          snipers.push(createSniperTower(x, y)); 
+          coins-=100; 
+          buyingSniper=false; 
+    }
   }
 });
 
-// 🖱 Обробник руху миші для "наведення"
+// 🖱 Обробник руху миші (Без змін)
 canvas.addEventListener("mousemove", e => {
     const r = canvas.getBoundingClientRect();
     const x = e.clientX - r.left;
     const y = e.clientY - r.top;
 
     hoveredTower = null;
-    const allTowers = [...towers, ...snipers];
-    const towerUnderMouse = allTowers.find(t => Math.hypot(t.x - x, t.y - y) < 15);
+    hoveredBarricade = null;
     
-    if (towerUnderMouse) {
-        hoveredTower = towerUnderMouse;
-        canvas.style.cursor = 'pointer'; // Змінюємо курсор, якщо ми над вежею
+    const allEntities = [...towers, ...snipers, ...barricades];
+    const entityUnderMouse = allEntities.find(t => Math.hypot(t.x - x, t.y - y) < 15);
+    
+    if (entityUnderMouse) {
+        if(towers.includes(entityUnderMouse) || snipers.includes(entityUnderMouse)) {
+            hoveredTower = entityUnderMouse;
+        } else {
+            hoveredBarricade = entityUnderMouse;
+        }
+        canvas.style.cursor = 'pointer'; 
     } else {
         canvas.style.cursor = 'default';
     }
 });
 
 
-// ⏱ Затримка (без змін)
+// ⏱ Затримка (Без змін)
 function sleep(ms){ return new Promise(res=>setTimeout(res,ms)); }
 
-// 🌊 Спавн хвиль (без змін)
-async function spawnWave(){
-  const incr = mode==="normal"?1:2;
-  const total = wave*incr;
-  const hpBase = mode==="normal"?50:50*0.75;
-  for(let i=0;i<total;i++){
-    enemies.push({x:path[0].x,y:path[0].y,hp:hpBase+wave*30,maxHp:hpBase+wave*30,speed:1,point:0});
-    await sleep(400);
-  }
-  if(wave===10){
-    const numBoss = mode==="normal"?1:2;
-    for(let i=0;i<numBoss;i++){
-      const boss={x:path[0].x,y:path[0].y,hp:500,maxHp:500,speed:0.7,point:0,lastAttack:0};
-      enemies.push(boss); bosses.push(boss);
-    }
-  }
-}
+// 🌊 Функція спавну для конкретної хвилі
+async function spawnWave(waveNum){
+    if (isSpawning) return; // Якщо спавн вже йде, блокуємо повторний запуск
+    
+    isSpawning = true;
+    advanceWaveButton.disabled = true; // Блокуємо кнопку
 
-// Послідовність хвиль (з алертом про перемогу)
-async function spawnWaveSequence(){
-  while(wave <= 10){
-    await spawnWave();
-    while(enemies.length > 0) await sleep(100);
-    wave++;
-  }
+    const incr = mode==="normal"?1:2;
+    const total = waveNum * incr;
+    const hpBase = mode==="normal"?50:50*0.75;
   
-  gameStarted = false; 
-  alert("🎉 ВІТАЄМО! Ви успішно захистили базу!");
+    // Звичайні вороги
+    for(let i=0;i<total;i++){
+        enemies.push({x:path[0].x,y:path[0].y,hp:hpBase+waveNum*30,maxHp:hpBase+waveNum*30,speed:1,point:0});
+        await sleep(400);
+    }
+  
+    // Боси на 10-й хвилі
+    if(waveNum===10){
+        const numBoss = mode==="normal"?1:2;
+        for(let i=0;i<numBoss;i++){
+            const boss={x:path[0].x,y:path[0].y,hp:500,maxHp:500,speed:0.7,point:0,lastAttack:0};
+            enemies.push(boss); bosses.push(boss);
+        }
+    }
+    
+    isSpawning = false;
+    advanceWaveButton.disabled = false; // Розблоковуємо кнопку
 }
 
-// 🎨 Малюємо доріжку (без змін)
+// 🌊 Послідовність хвиль (з оновленою логікою)
+async function spawnWaveSequence(waveNum){
+    
+    // Якщо поточна хвиля, яку ми намагаємося запустити, вже спавниться, просто виходимо.
+    if (isSpawning) {
+        // Логіка тут була складною. Натомість, ми просто запускаємо спавн, 
+        // а isSpawning всередині spawnWave гарантує, що цикл не почнеться двічі.
+    }
+    
+    await spawnWave(waveNum);
+    
+    // Це відстежує автоматичний перехід, коли всі вороги знищені
+    const checkEnemiesAndAdvance = async () => {
+        // Перевіряємо, чи не натиснув гравець кнопку (якщо currentWaveIndex більший)
+        if (currentWaveIndex > waveNum) return; 
+
+        // Чекаємо, поки вороги з цієї хвилі будуть знищені 
+        while(enemies.length > 0) {
+            // Перевіряємо, чи не натиснув гравець кнопку під час очікування
+            if (currentWaveIndex > waveNum) return; 
+            await sleep(100);
+        }
+        
+        // Якщо це була остання хвиля, перемога
+        if (waveNum >= 10) {
+            gameStarted = false; 
+            alert("🎉 ВІТАЄМО! Ви успішно захистили базу!");
+            return;
+        }
+
+        // Якщо всі вороги знищені і гравець не перейшов сам (currentWaveIndex не змінився),
+        // автоматично переходимо на наступну хвилю
+        if (currentWaveIndex === waveNum) {
+            wave = waveNum; // Оновлюємо лічильник завершених хвиль
+            currentWaveIndex++;
+            spawnWaveSequence(currentWaveIndex);
+        }
+    };
+    
+    // Якщо ми щойно запустили цю хвилю, встановлюємо очікування для автоматичного переходу
+    if (currentWaveIndex === waveNum) {
+        checkEnemiesAndAdvance();
+    }
+}
+
+// 🎨 Малювання та оновлення стану гри (Без змін)
 function drawPath(){
   ctx.strokeStyle="#555"; ctx.lineWidth=pathWidth; ctx.lineJoin="round";
   ctx.beginPath(); ctx.moveTo(path[0].x,path[0].y);
   path.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.stroke();
 }
-
-// 🎨 МАЛЮВАННЯ ХРЕСТИКА ДЛЯ ПРОДАЖУ
-function drawSellButton(t){
-    const sellX = t.x + 10;
-    const sellY = t.y - 15;
-    const s = SELL_BUTTON_SIZE / 2;
+function drawButton(x, y, color, text, subtext = null) {
+    const s = BUTTON_SIZE / 2;
     
-    ctx.fillStyle = "red";
-    ctx.fillRect(sellX - s, sellY - s, SELL_BUTTON_SIZE, SELL_BUTTON_SIZE);
+    ctx.fillStyle = color;
+    ctx.fillRect(x - s, y - s, BUTTON_SIZE, BUTTON_SIZE);
     
-    // Малюємо "X" білим кольором
-    ctx.strokeStyle = "white";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(sellX - s + 2, sellY - s + 2);
-    ctx.lineTo(sellX + s - 2, sellY + s - 2);
-    ctx.moveTo(sellX + s - 2, sellY - s + 2);
-    ctx.lineTo(sellX - s + 2, sellY + s - 2);
-    ctx.stroke();
+    ctx.fillStyle = "white";
+    ctx.font = "bold 14px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(text, x, y + 5);
 
-    // Додаємо інформацію про продаж
-    const sellPrice = snipers.includes(t) ? 50 : 25;
-    ctx.fillStyle = "yellow";
-    ctx.font = "bold 10px Arial";
-    ctx.fillText(sellPrice, sellX, sellY + SELL_BUTTON_SIZE + 5);
+    if (subtext !== null) {
+        ctx.fillStyle = "yellow";
+        ctx.font = "10px Arial";
+        ctx.fillText(subtext, x, y + BUTTON_SIZE + 2);
+    }
 }
-
 
 // 🔄 Головний цикл
 function update(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   drawPath();
 
-  // 🏰 Звичайні вежі
+    // ... (Логіка малювання барикад, веж, ворогів і куль без змін) ...
+    
+    // --- БАРИКАДИ ---
+    for(let i = barricades.length - 1; i >= 0; i--) {
+        const b = barricades[i];
+        
+        ctx.fillStyle = "sandybrown";
+        ctx.fillRect(b.x - 15, b.y - 15, 30, 30);
+        ctx.strokeStyle = "brown";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(b.x - 15, b.y - 15, 30, 30);
+        
+        ctx.fillStyle = "black"; ctx.fillRect(b.x-15, b.y-20, 30, 4);
+        ctx.fillStyle = b.hp/b.maxHp > 0.5 ? "lime" : (b.hp/b.maxHp > 0.2 ? "orange" : "red");
+        ctx.fillRect(b.x-15, b.y-20, 30 * (b.hp / b.maxHp), 4);
+        
+        if(b === selectedBarricade || b === hoveredBarricade) {
+            ctx.strokeStyle = "yellow";
+            ctx.strokeRect(b.x - 17, b.y - 17, 34, 34);
+
+            ctx.fillStyle = "white";
+            ctx.font = "bold 10px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText(`Lvl ${b.level}`, b.x, b.y + 20);
+
+            if(b === selectedBarricade) {
+                const upgradeCost = getBarricadeUpgradeCost(b);
+                const sellPrice = getBarricadeSellPrice(b);
+
+                drawButton(b.x + BUTTON_SELL_OFFSET_X, b.y + BUTTON_OFFSET_Y, "red", "X", sellPrice);
+
+                const healColor = coins >= BARRICADE_HEAL_COST && b.hp < b.maxHp ? "darkgreen" : "gray";
+                const healSubtext = b.hp < b.maxHp ? BARRICADE_HEAL_COST : "FULL";
+                drawButton(b.x + BUTTON_HEAL_OFFSET_X, b.y + BUTTON_OFFSET_Y, healColor, "❤️", healSubtext);
+                
+                if(upgradeCost !== null){
+                    const upColor = coins >= upgradeCost ? "green" : "darkred";
+                    drawButton(b.x + BUTTON_UPGRADE_OFFSET_X, b.y + BUTTON_OFFSET_Y, upColor, "⬆", upgradeCost);
+                } else {
+                    drawButton(b.x + BUTTON_UPGRADE_OFFSET_X, b.y + BUTTON_OFFSET_Y, "gray", "★", "MAX");
+                }
+            }
+        }
+        
+        if(b.hp <= 0) {
+            barricades.splice(i, 1);
+            if(selectedBarricade === b) selectedBarricade = null;
+        }
+    }
+
+
+  // --- ВЕЖІ ---
   towers.forEach(t=>{
     ctx.fillStyle=t.stunned>0?"gray":"cyan";
-    // Якщо вежа виділена або на неї наведено курсор, малюємо коло вибору/рейнджа
     if(t === selectedTower || t === hoveredTower) {
         ctx.strokeStyle = "rgba(0, 255, 255, 0.5)";
         ctx.beginPath();
         ctx.arc(t.x, t.y, t.range, 0, Math.PI * 2);
         ctx.stroke();
+        
+        ctx.fillStyle = "white";
+        ctx.font = "bold 10px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(`Lvl ${t.level}`, t.x, t.y + 20);
     }
     ctx.beginPath(); ctx.arc(t.x,t.y,10,0,Math.PI*2); ctx.fill();
     
     if(t === selectedTower) {
-        drawSellButton(t);
+        const upgradeCost = getUpgradeCost(t);
+        const sellPrice = getSellPrice(t);
+
+        drawButton(t.x + BUTTON_SELL_OFFSET_X, t.y + BUTTON_OFFSET_Y, "red", "X", sellPrice);
+
+        if(upgradeCost !== null){
+            drawButton(t.x + BUTTON_UPGRADE_OFFSET_X, t.y + BUTTON_OFFSET_Y, coins >= upgradeCost ? "green" : "darkred", "⬆", upgradeCost);
+        } else {
+            drawButton(t.x + BUTTON_UPGRADE_OFFSET_X, t.y + BUTTON_OFFSET_Y, "gray", "★", "MAX");
+        }
     }
     
     if(t.cooldown>0) t.cooldown--; if(t.stunned>0) t.stunned--;
     if(t.cooldown===0 && t.stunned===0){
       const target=enemies.find(e=>Math.hypot(e.x-t.x,e.y-t.y)<t.range);
       if(target){
-        const d=Math.hypot(target.x-t.x,target.y-t.y);
-        bullets.push({x:t.x,y:t.y,dx:(target.x-t.x)/d*4,dy:(target.y-t.y)/d*4,magnetic:false});
-        t.cooldown=25;
+          const damage = t.damage; 
+          const d=Math.hypot(target.x-t.x,target.y-t.y);
+          bullets.push({x:t.x,y:t.y,dx:(target.x-t.x)/d*4,dy:(target.y-t.y)/d*4,magnetic:false, damage: damage});
+          t.cooldown=25;
       }
     }
   });
 
   // 🎯 Снайперські
   snipers.forEach(s=>{
-    // Якщо снайперська вежа виділена або на неї наведено курсор, малюємо коло вибору/рейнджа
     if(s === selectedTower || s === hoveredTower) {
         ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
         ctx.beginPath();
         ctx.arc(s.x, s.y, s.range, 0, Math.PI * 2);
         ctx.stroke();
+
+        ctx.fillStyle = "white";
+        ctx.font = "bold 10px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(`Lvl ${s.level}`, s.x, s.y + 20);
     }
 
     if(s.cooldown>0) s.cooldown--;
     else{
       const target=enemies.find(e=>Math.hypot(e.x-s.x,e.y-s.y)<s.range);
-      if(target){ bullets.push({x:s.x,y:s.y,dx:0,dy:0,magnetic:true,target}); s.cooldown=50; }
+      if(target){ 
+          const damage = s.damage;
+          bullets.push({x:s.x,y:s.y,dx:0,dy:0,magnetic:true,target, damage: damage}); 
+          s.cooldown=50; 
+        }
     }
     ctx.fillStyle="white"; ctx.beginPath(); ctx.arc(s.x,s.y,12,0,Math.PI*2); ctx.fill();
 
     if(s === selectedTower) {
-        drawSellButton(s);
+        const upgradeCost = getUpgradeCost(s);
+        const sellPrice = getSellPrice(s);
+
+        drawButton(s.x + BUTTON_SELL_OFFSET_X, s.y + BUTTON_OFFSET_Y, "red", "X", sellPrice);
+
+        if(upgradeCost !== null){
+            drawButton(s.x + BUTTON_UPGRADE_OFFSET_X, s.y + BUTTON_OFFSET_Y, coins >= upgradeCost ? "green" : "darkred", "⬆", upgradeCost);
+        } else {
+            drawButton(s.x + BUTTON_UPGRADE_OFFSET_X, s.y + BUTTON_OFFSET_Y, "gray", "★", "MAX");
+        }
     }
   });
 
-  // 👾 Вороги (без змін)
+  // 👾 Вороги 
   for(let i=enemies.length-1;i>=0;i--){
     const e=enemies[i];
     const target=path[e.point+1];
-    if(target){
-      const dx=target.x-e.x, dy=target.y-e.y, dist=Math.hypot(dx,dy);
-      e.x+=dx/dist*e.speed; e.y+=dy/dist*e.speed; if(dist<2) e.point++;
-    } else { baseHP -= bosses.includes(e)?50:10; enemies.splice(i,1); if(baseHP<=0){ alert("🛑 База знищена!"); location.reload(); } }
+    
+    let isColliding = false;
+    const hitBarricade = barricades.find(b => Math.hypot(e.x - b.x, e.y - b.y) < 25); 
+
+    if (hitBarricade) {
+        isColliding = true;
+        const damage = bosses.includes(e) ? 100 : 15; 
+        hitBarricade.hp -= damage;
+        
+        if (!bosses.includes(e)) {
+            enemies.splice(i, 1);
+            continue; 
+        }
+    }
+
+    if (!isColliding) {
+        if(target){
+          const dx=target.x-e.x, dy=target.y-e.y, dist=Math.hypot(dx,dy);
+          e.x+=dx/dist*e.speed; e.y+=dy/dist*e.speed; if(dist<2) e.point++;
+        } else { 
+          baseHP -= bosses.includes(e)?50:10; 
+          enemies.splice(i,1); 
+          if(baseHP<=0){ alert("🛑 База знищена!"); location.reload(); } 
+        }
+    }
 
     if(bosses.includes(e)){
       ctx.fillStyle="orange"; ctx.beginPath(); ctx.moveTo(e.x,e.y-15); ctx.lineTo(e.x-15,e.y+15); ctx.lineTo(e.x+15,e.y+15); ctx.closePath(); ctx.fill();
@@ -377,20 +640,22 @@ function update(){
     for(let ei=enemies.length-1;ei>=0;ei--){
       const e=enemies[ei];
       if(Math.abs(b.x-e.x)<10 && Math.abs(b.y-e.y)<10){
-        e.hp-=20; bullets.splice(bi,1);
-        if(e.hp<=0){
-          const isBoss=bosses.includes(e);
-          if(isBoss){ bosses.splice(bosses.indexOf(e),1); coins+=10; }
-          else coins+=(mode==="hard"?8:10);
-          enemies.splice(ei,1);
-        }
-        break;
+          e.hp-= (b.damage || 20); 
+          bullets.splice(bi,1);
+          
+          if(e.hp<=0){
+            const isBoss=bosses.includes(e);
+            if(isBoss){ bosses.splice(bosses.indexOf(e),1); coins+=10; }
+            else coins+=(mode==="hard"?5:10);
+            enemies.splice(ei,1);
+          }
+          break;
       }
     }
   }
 
   document.getElementById("coins").innerText=coins;
-  document.getElementById("wave").innerText=Math.min(wave,10);
+  document.getElementById("wave").innerText=Math.min(currentWaveIndex,10); 
   if(!document.getElementById("baseHP")){
     const p=document.createElement("p"); p.id="baseHP"; p.innerText="База HP: "+baseHP; document.body.insertBefore(p,canvas);
   } else document.getElementById("baseHP").innerText="База HP: "+baseHP;
